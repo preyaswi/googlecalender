@@ -6,9 +6,12 @@ import (
 	"googlecalenderservice/pkg/config"
 	"googlecalenderservice/pkg/models"
 	"log"
+	"strings"
+	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/session"
+	"github.com/lib/pq"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/calendar/v3"
@@ -54,7 +57,7 @@ func init() {
 	}
 
 	// AutoMigrate the User model
-	db.AutoMigrate(&models.User{})
+	db.AutoMigrate(&models.User{}, &models.Event{})
 }
 
 func handleGoogleLogin(c *fiber.Ctx) error {
@@ -133,13 +136,106 @@ func handleGoogleCallback(c *fiber.Ctx) error {
 	// Redirect the user to Google Calendar interface
 	return c.Redirect("https://calendar.google.com")
 }
+func handleCreateEvent(c *fiber.Ctx) error {
 
+	userID := c.Get("X-User-Id")
+	if userID == "" {
+		log.Printf("user_id not found in header")
+		return c.Status(fiber.StatusUnauthorized).SendString("user_id not found in header")
+	}
+
+	// Get the event details from the request
+	eventSummary := c.FormValue("summary")
+	eventDescription := c.FormValue("description")
+	startTime, _ := time.Parse(time.RFC3339, c.FormValue("start"))
+	endTime, _ := time.Parse(time.RFC3339, c.FormValue("end"))
+	guestEmails := strings.Split(c.FormValue("guests"), ",")
+
+	// Retrieve the user's access token from the database
+	var user models.User
+	if err := db.Where("google_id = ?", userID).First(&user).Error; err != nil {
+		log.Printf("Failed to retrieve user: %v", err)
+		return c.Status(fiber.StatusInternalServerError).SendString("Failed to retrieve user")
+	}
+
+	// Create a new Google Calendar API client
+	config := &oauth2.Config{
+		ClientID:     googleOauthConfig.ClientID,
+		ClientSecret: googleOauthConfig.ClientSecret,
+		RedirectURL:  googleOauthConfig.RedirectURL,
+		Scopes:       googleOauthConfig.Scopes,
+		Endpoint:     google.Endpoint,
+	}
+	token := &oauth2.Token{
+		AccessToken:  user.AccessToken,
+		RefreshToken: user.RefreshToken,
+		Expiry:       user.TokenExpiry,
+	}
+	client := config.Client(c.Context(), token)
+	calendarService, err := calendar.New(client)
+	if err != nil {
+		log.Printf("Unable to create calendar service: %v", err)
+		return c.Status(fiber.StatusInternalServerError).SendString("Unable to create calendar service")
+	}
+
+	// Create a new event using the Google Calendar API
+	event := &calendar.Event{
+		Summary:     eventSummary,
+		Description: eventDescription,
+		Start: &calendar.EventDateTime{
+			DateTime: startTime.Format(time.RFC3339),
+			TimeZone: "UTC",
+		},
+		End: &calendar.EventDateTime{
+			DateTime: endTime.Format(time.RFC3339),
+			TimeZone: "UTC",
+		},
+		Attendees: make([]*calendar.EventAttendee, len(guestEmails)),
+	}
+	for i, email := range guestEmails {
+		event.Attendees[i] = &calendar.EventAttendee{Email: email}
+	}
+	createdEvent, err := calendarService.Events.Insert("primary", event).Do()
+	if err != nil {
+		log.Printf("Unable to create event: %v", err)
+		return c.Status(fiber.StatusInternalServerError).SendString("Unable to create event")
+	}
+
+	// Store the event details in the database
+	newEvent := models.Event{
+        UserID:      user.ID,
+        EventID:     createdEvent.Id,
+        Summary:     eventSummary,
+        Description: eventDescription,
+        Start:       startTime,
+        End:         endTime,
+        CreatedAt:   time.Now(),
+    }
+	 // Insert the event details without the GuestEmails field
+	 if err := db.Create(&newEvent).Omit("GuestEmails").Error; err != nil {
+        log.Printf("Failed to store event in the database: %v", err)
+        return c.Status(fiber.StatusInternalServerError).SendString("Failed to store event in the database")
+    }
+
+    // Convert the GuestEmails slice to a PostgreSQL array literal
+    guestEmailsArray := pq.Array(guestEmails)
+
+    // Update the GuestEmails field separately
+    if err := db.Model(&newEvent).UpdateColumn("guest_emails", guestEmailsArray).Error; err != nil {
+        log.Printf("Failed to store guest_emails in the database: %v", err)
+        return c.Status(fiber.StatusInternalServerError).SendString("Failed to store guest_emails in the database")
+    }
+
+    return c.Status(fiber.StatusOK).JSON(createdEvent)
+
+}
 func main() {
 	app := fiber.New()
 
 	// Routes
 	app.Get("/google-login", handleGoogleLogin)
 	app.Get("/google/redirect", handleGoogleCallback)
+	app.Post("/create-event", handleCreateEvent)
 
 	// Start server
 	log.Fatal(app.Listen(":8000"))
