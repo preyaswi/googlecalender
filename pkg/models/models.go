@@ -21,6 +21,6 @@ type Event struct {
     Description    string
     Start          time.Time
     End            time.Time
-    GuestEmails    []string `gorm:"type:text[]"`
+    GuestEmail    string
     CreatedAt      time.Time
 }

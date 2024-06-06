@@ -6,12 +6,10 @@ import (
 	"googlecalenderservice/pkg/config"
 	"googlecalenderservice/pkg/models"
 	"log"
-	"strings"
 	"time"
 
 	"github.com/gofiber/fiber/v2"
 	"github.com/gofiber/fiber/v2/middleware/session"
-	"github.com/lib/pq"
 	"golang.org/x/oauth2"
 	"golang.org/x/oauth2/google"
 	"google.golang.org/api/calendar/v3"
@@ -149,7 +147,8 @@ func handleCreateEvent(c *fiber.Ctx) error {
 	eventDescription := c.FormValue("description")
 	startTime, _ := time.Parse(time.RFC3339, c.FormValue("start"))
 	endTime, _ := time.Parse(time.RFC3339, c.FormValue("end"))
-	guestEmails := strings.Split(c.FormValue("guests"), ",")
+	guestEmail := c.FormValue("guest")
+	// guestEmails := strings.Split(c.FormValue("guests"), ",")
 
 	// Retrieve the user's access token from the database
 	var user models.User
@@ -190,11 +189,14 @@ func handleCreateEvent(c *fiber.Ctx) error {
 			DateTime: endTime.Format(time.RFC3339),
 			TimeZone: "UTC",
 		},
-		Attendees: make([]*calendar.EventAttendee, len(guestEmails)),
+		Attendees: []*calendar.EventAttendee{
+            {Email: guestEmail}, // Change from a slice to a single attendee
+        },
+		// Attendees: make([]*calendar.EventAttendee, len(guestEmails)),
 	}
-	for i, email := range guestEmails {
-		event.Attendees[i] = &calendar.EventAttendee{Email: email}
-	}
+	// for i, email := range guestEmails {
+	// 	event.Attendees[i] = &calendar.EventAttendee{Email: email}
+	// }
 	createdEvent, err := calendarService.Events.Insert("primary", event).Do()
 	if err != nil {
 		log.Printf("Unable to create event: %v", err)
@@ -209,22 +211,28 @@ func handleCreateEvent(c *fiber.Ctx) error {
         Description: eventDescription,
         Start:       startTime,
         End:         endTime,
+		GuestEmail:  guestEmail,
         CreatedAt:   time.Now(),
     }
-	 // Insert the event details without the GuestEmails field
-	 if err := db.Create(&newEvent).Omit("GuestEmails").Error; err != nil {
+	if err := db.Create(&newEvent).Error; err != nil {
         log.Printf("Failed to store event in the database: %v", err)
         return c.Status(fiber.StatusInternalServerError).SendString("Failed to store event in the database")
     }
 
-    // Convert the GuestEmails slice to a PostgreSQL array literal
-    guestEmailsArray := pq.Array(guestEmails)
+	//  // Insert the event details without the GuestEmails field
+	//  if err := db.Create(&newEvent).Omit("GuestEmails").Error; err != nil {
+    //     log.Printf("Failed to store event in the database: %v", err)
+    //     return c.Status(fiber.StatusInternalServerError).SendString("Failed to store event in the database")
+    // }
 
-    // Update the GuestEmails field separately
-    if err := db.Model(&newEvent).UpdateColumn("guest_emails", guestEmailsArray).Error; err != nil {
-        log.Printf("Failed to store guest_emails in the database: %v", err)
-        return c.Status(fiber.StatusInternalServerError).SendString("Failed to store guest_emails in the database")
-    }
+    // // Convert the GuestEmails slice to a PostgreSQL array literal
+    // guestEmailsArray := pq.Array(guestEmails)
+
+    // // Update the GuestEmails field separately
+    // if err := db.Model(&newEvent).UpdateColumn("guest_emails", guestEmailsArray).Error; err != nil {
+    //     log.Printf("Failed to store guest_emails in the database: %v", err)
+    //     return c.Status(fiber.StatusInternalServerError).SendString("Failed to store guest_emails in the database")
+    // }
 
     return c.Status(fiber.StatusOK).JSON(createdEvent)
 
